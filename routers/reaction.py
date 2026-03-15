@@ -1,12 +1,13 @@
 from typing import Annotated
 from sqlalchemy.orm import Session
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from starlette import status
 from database import get_db
 from .auth import get_current_user
 from models import reaction as Reaction, Post, Comment
-from datetime import datetime
+from datetime import datetime, timezone
 from core.access_control import can_view_post
+from uuid import UUID
 
 
 router = APIRouter()
@@ -33,7 +34,7 @@ async def read_all_Reaction(user: user_dependency, db: db_dependency):
 
     return (
         db.query(Reaction)
-        .filter(Reaction.user_id == user.get("id"))
+        .filter(Reaction.user_id == UUID(str(user.get("id"))))
         .all()
     )
 
@@ -42,7 +43,12 @@ async def read_all_Reaction(user: user_dependency, db: db_dependency):
 
 
 @router.get("/post/{post_id}", status_code=status.HTTP_200_OK)
-async def get_post_Reaction(user: user_dependency,db: db_dependency,post_id: str = Path(...)
+async def get_post_Reaction(
+    user: user_dependency, 
+    db: db_dependency, 
+    post_id: UUID = Path(...),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100)
 ):
     _ensure_auth(user)
 
@@ -54,18 +60,22 @@ async def get_post_Reaction(user: user_dependency,db: db_dependency,post_id: str
     if not can_view_post(db, user, post):
         raise HTTPException(status_code=403, detail="Not allowed to view this post")
 
-    reactions = db.query(Reaction).filter(Reaction.post_id == post_id).all()
+    reactions = db.query(Reaction).filter(Reaction.post_id == post_id).offset(skip).limit(limit).all()
     return reactions
 
 @router.post("/post/{post_id}", status_code=status.HTTP_201_CREATED)
-async def Reaction_post(user: user_dependency,db: db_dependency,post_id: str = Path(...)):
+async def Reaction_post(user: user_dependency, db: db_dependency, post_id: UUID = Path(...)):
     _ensure_auth(user)
-    user_id = user.get("id")
+    user_id = UUID(str(user.get("id")))
 
     # نتأكد أن البوست موجود
     post = db.query(Post).filter(Post.post_id == post_id).first()
     if post is None:
         raise HTTPException(status_code=404, detail="Post not found")
+
+    # Check if post is deleted
+    if post.is_deleted:
+        raise HTTPException(status_code=404, detail="Post has been deleted")
 
     if not can_view_post(db, user, post):
         raise HTTPException(status_code=403, detail="Not allowed to react to this post")
@@ -81,24 +91,28 @@ async def Reaction_post(user: user_dependency,db: db_dependency,post_id: str = P
     if existing:
         raise HTTPException(status_code=400, detail="Already reactioned")
 
-    reaction = Reaction(
-        user_id=user_id,
-        post_id=post_id,
-        comment_id=None,
-        created_at=datetime.utcnow(),
-    )
+    try:
+        reaction = Reaction(
+            user_id=user_id,
+            post_id=post_id,
+            comment_id=None,
+            created_at=datetime.now(timezone.utc),
+        )
 
-    db.add(reaction)
-    db.commit()
-    db.refresh(reaction)
+        db.add(reaction)
+        db.commit()
+        db.refresh(reaction)
 
-    return reaction
+        return reaction
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @router.delete("/post/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def unlike_post(user: user_dependency,db: db_dependency,post_id: str = Path(...)):
+async def unlike_post(user: user_dependency, db: db_dependency, post_id: UUID = Path(...)):
     _ensure_auth(user)
-    user_id = user.get("id")
+    user_id = UUID(str(user.get("id")))
 
     reaction = (
         db.query(Reaction)
@@ -122,7 +136,7 @@ async def unlike_post(user: user_dependency,db: db_dependency,post_id: str = Pat
 async def get_comment_Reactions(
     user: user_dependency,
     db: db_dependency,
-    comment_id: str = Path(...)
+    comment_id: UUID = Path(...)
 ):
     _ensure_auth(user)
 
@@ -140,9 +154,9 @@ async def get_comment_Reactions(
 
 
 @router.post("/comment/{comment_id}", status_code=status.HTTP_201_CREATED)
-async def like_comment(user: user_dependency,db: db_dependency,comment_id: str = Path(...)):
+async def like_comment(user: user_dependency, db: db_dependency, comment_id: UUID = Path(...)):
     _ensure_auth(user)
-    user_id = user.get("id")
+    user_id = UUID(str(user.get("id")))
 
     # نتأكد أن الكومنت موجود
     comment = (
@@ -152,6 +166,10 @@ async def like_comment(user: user_dependency,db: db_dependency,comment_id: str =
     )
     if comment is None:
         raise HTTPException(status_code=404, detail="Comment not found")
+
+    # Check if comment is deleted
+    if comment.is_deleted:
+        raise HTTPException(status_code=404, detail="Comment has been deleted")
 
     # Check post visibility
     post = db.query(Post).filter(Post.post_id == comment.post_id).first()
@@ -168,28 +186,32 @@ async def like_comment(user: user_dependency,db: db_dependency,comment_id: str =
     if existing:
         raise HTTPException(status_code=400, detail="Already reactioned")
 
-    reaction = Reaction(
-        user_id=user_id,
-        post_id=None,
-        comment_id=comment_id,
-        created_at=datetime.utcnow(),
-    )
+    try:
+        reaction = Reaction(
+            user_id=user_id,
+            post_id=None,
+            comment_id=comment_id,
+            created_at=datetime.now(timezone.utc),
+        )
 
-    db.add(reaction)
-    db.commit()
-    db.refresh(reaction)
+        db.add(reaction)
+        db.commit()
+        db.refresh(reaction)
 
-    return reaction
+        return reaction
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @router.delete("/comment/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def unReaction_comment(
     user: user_dependency,
     db: db_dependency,
-    comment_id: str = Path(...)
+    comment_id: UUID = Path(...)
 ):
     _ensure_auth(user)
-    user_id = user.get("id")
+    user_id = UUID(str(user.get("id")))
 
     reaction = (
         db.query(Reaction)
@@ -204,3 +226,4 @@ async def unReaction_comment(
 
     db.delete(reaction)
     db.commit()
+

@@ -2,12 +2,12 @@ from typing import Annotated, Optional, List, Set
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from starlette import status
-from models import Post, Friendship
+from models import Post, Friendship, Users, Profile
 from database import get_db
 from .auth import get_current_user
-from datetime import datetime
+from datetime import datetime, timezone
 from core.permissions import require_authenticated, is_admin
 from uuid import UUID
 
@@ -25,31 +25,88 @@ class PostRequest(BaseModel):
 
 
 
-from core.access_control import get_friend_ids, can_view_post
+from core.access_control import get_friend_ids, can_view_post, get_blocked_user_ids
+
+
+def _serialize_post(post: Post, db: Session, author: Users = None, profile: Profile = None) -> dict:
+    """Convert a Post ORM object to a dict with joined author info."""
+    data = {
+        "post_id": str(post.post_id),
+        "author_id": str(post.author_id),
+        "title": post.title,
+        "content": post.content,
+        "tags": post.tags,
+        "visibility": post.visibility,
+        "created_at": str(post.created_at),
+        "updated_at": str(post.updated_at),
+        "is_deleted": post.is_deleted,
+    }
+    
+    if author is None:
+        author = db.query(Users).filter(Users.id == post.author_id).first()
+    if profile is None:
+        profile = db.query(Profile).filter(
+            Profile.user_id == post.author_id,
+            Profile.is_deleted == False,
+        ).first()
+        
+    data["author_username"] = author.username if author else None
+    data["author_display_name"] = profile.display_name if profile else None
+    data["author_avatar"] = profile.avatar_url if profile else None
+    return data
 
 
 
 
 # 1) بوستات المستخدم أو كل البوستات لِلأدمن 
 @router.get("/", status_code=status.HTTP_200_OK)
-async def read_all_posts(user: user_dependency, db: db_dependency):
+async def read_all_posts(
+    user: user_dependency, 
+    db: db_dependency,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100)
+):
     require_authenticated(user)
 
     if is_admin(user):
-        return (
+        posts = (
             db.query(Post)
             .filter(Post.is_deleted == False)
             .order_by(Post.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+    else:
+        posts = (
+            db.query(Post)
+            .filter(Post.author_id == user.get("id"))
+            .filter(Post.is_deleted == False)
+            .order_by(Post.created_at.desc())
+            .offset(skip)
+            .limit(limit)
             .all()
         )
 
-    return (
-        db.query(Post)
-        .filter(Post.author_id == user.get("id"))
-        .filter(Post.is_deleted == False)
-        .order_by(Post.created_at.desc())
-        .all()
-    )
+    if not posts:
+        return []
+
+    # Bulk fetch authors and profiles
+    author_ids = [p.author_id for p in posts]
+    authors = db.query(Users).filter(Users.id.in_(author_ids)).all()
+    profiles = db.query(Profile).filter(Profile.user_id.in_(author_ids), Profile.is_deleted == False).all()
+
+    author_dict = {u.id: u for u in authors}
+    profile_dict = {p.user_id: p for p in profiles}
+
+    return [
+        _serialize_post(
+            p, 
+            db, 
+            author=author_dict.get(p.author_id), 
+            profile=profile_dict.get(p.author_id)
+        ) for p in posts
+    ]
 
 
 #  قراءة بوست واحد مع احترام visibility + friends
@@ -79,7 +136,7 @@ async def read_post(
             detail="Not allowed to view this post",
         )
 
-    return post
+    return _serialize_post(post, db)
 
 
 #  إنشاء بوست
@@ -98,8 +155,8 @@ async def create_post(
         content=post_request.content,
         tags=post_request.tags,
         visibility=post_request.visibility,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
         is_deleted=False,
     )
 
@@ -107,7 +164,7 @@ async def create_post(
     db.commit()
     db.refresh(post)
 
-    return post
+    return _serialize_post(post, db)
 
 
 #  تعديل بوست (صاحب البوست)
@@ -133,7 +190,7 @@ async def update_post(
     for key, value in update_data.items():
         setattr(post, key, value)
 
-    post.updated_at = datetime.utcnow()
+    post.updated_at = datetime.now(timezone.utc)
 
     db.add(post)
     db.commit()
@@ -162,55 +219,75 @@ async def delete_post(
     db.commit()
 
 
-# 6) الـ FEED – الـ Timeline حسب visibility + friends
+# 6) الـ FEED – الـ Timeline حسب Weighted Score Algorithm
 @router.get("/feed", status_code=status.HTTP_200_OK)
 async def get_feed(
     user: user_dependency,
     db: db_dependency,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100)
 ):
     """
-    يرجّع البوستات التي يحق للمستخدم الحالي أن يراها:
-      - بوستاته هو نفسه
-      - البوستات العامة (public) لأي مستخدم
-      - البوستات الخاصة (private) للأصدقاء فقط
-      - الـ admin يشوف كل شيء (غير محذوف).
+    يرجّع البوستات مرتبة حسب خوارزمية Weighted Score:
+      Score = (reactions×2 + comments×3 + 1) × relationship_bonus × time_decay
+      - relationship_bonus: 1.5 أصدقاء | 1.2 بوستاتي | 1.0 غيرهم
+      - time_decay: البوستات الأحدث لها أولوية
+      - الـ admin يشوف كل شيء بالترتيب الزمني.
     """
     require_authenticated(user)
 
-    # الأدمن: يشوف كل البوستات (غير المحذوفة)
+    # الأدمن: يشوف كل البوستات (غير المحذوفة) بالترتيب الزمني
     if is_admin(user):
         posts = (
             db.query(Post)
             .filter(Post.is_deleted == False)
             .order_by(Post.created_at.desc())
+            .offset(skip)
+            .limit(limit)
             .all()
         )
-        return posts
+    else:
+        user_id_str = user.get("id")
+        if not user_id_str:
+            raise HTTPException(status_code=401, detail="Authentication Failed")
+        user_id = UUID(str(user_id_str))
 
-    user_id = UUID(str(user["id"]))
+        # IDs للأصدقاء والمحظورين
+        friend_ids = get_friend_ids(db, user_id)
+        blocked_ids = get_blocked_user_ids(db, user_id)
 
-    # IDs للأصدقاء
-    friend_ids = get_friend_ids(db, user_id)
+        # استخدام خوارزمية الترتيب الذكي
+        from core.feed_algorithm import build_ranked_feed_query
 
-    # بوستات يحق للمستخدم رؤيتها
-    posts = (
-        db.query(Post)
-        .filter(Post.is_deleted == False)
-        .filter(
-            or_(
-                # بوستات المستخدم نفسه
-                Post.author_id == user_id,
-                # بوستات public
-                Post.visibility == "public",
-                # بوستات private للأصدقاء فقط
-                and_(
-                    Post.visibility == "private",
-                    Post.author_id.in_(friend_ids) if friend_ids else False,
-                ),
-            )
+        ranked_query = build_ranked_feed_query(
+            db=db,
+            user_id=user_id,
+            friend_ids=friend_ids,
+            blocked_ids=blocked_ids,
+            skip=skip,
+            limit=limit,
         )
-        .order_by(Post.created_at.desc())
-        .all()
-    )
 
-    return posts
+        # النتيجة هي (Post, score) — نأخذ فقط الـ Post
+        results = ranked_query.all()
+        posts = [row[0] for row in results]
+
+    if not posts:
+        return []
+
+    # Bulk fetch authors and profiles
+    author_ids = [p.author_id for p in posts]
+    authors = db.query(Users).filter(Users.id.in_(author_ids)).all()
+    profiles = db.query(Profile).filter(Profile.user_id.in_(author_ids), Profile.is_deleted == False).all()
+
+    author_dict = {u.id: u for u in authors}
+    profile_dict = {p.user_id: p for p in profiles}
+
+    return [
+        _serialize_post(
+            p, 
+            db, 
+            author=author_dict.get(p.author_id), 
+            profile=profile_dict.get(p.author_id)
+        ) for p in posts
+    ]

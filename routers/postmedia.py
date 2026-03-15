@@ -6,8 +6,9 @@ from starlette import status
 from models import Post, PostMedia, Friendship
 from database import get_db
 from .auth import get_current_user
-from datetime import datetime
+from datetime import datetime, timezone
 from core.permissions import is_admin 
+from uuid import UUID
 
 router = APIRouter()
 
@@ -20,7 +21,7 @@ user_dependency = Annotated[dict, Depends(get_current_user)]
 
 class MediaRequest(BaseModel):
     file_url: str = Field(min_length=5)
-    media_type: str = Field(pattern="^(image|video|audio|document)$")
+    media_type: str = Field(pattern="^(image|video|audio|file)$")
     metadata: Optional[Dict] = None
 
 
@@ -54,7 +55,7 @@ def _can_view_post_media(db: Session, user: dict, post: Post) -> bool:
         return True
 
     #  بوست خاص -> فقط الأصدقاء (status = accepted)
-    if visibility == "private":
+    if visibility in ("private", "friends"):
         friendship = (
             db.query(Friendship)
             .filter(Friendship.status == "accepted")
@@ -82,7 +83,7 @@ def _can_view_post_media(db: Session, user: dict, post: Post) -> bool:
 async def get_post_media(
     user: user_dependency,
     db: db_dependency,
-    post_id: str = Path(...)
+    post_id: UUID = Path(...)
 ):
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication Failed")
@@ -91,6 +92,7 @@ async def get_post_media(
     post = (
         db.query(Post)
         .filter(Post.post_id == post_id)
+        .filter(Post.is_deleted == False)
         .first()
     )
 
@@ -110,7 +112,7 @@ async def get_post_media(
 async def get_media(
     user: user_dependency,
     db: db_dependency,
-    media_id: str = Path(...)
+    media_id: UUID = Path(...)
 ):
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication Failed")
@@ -136,8 +138,8 @@ async def get_media(
 async def create_post_media(
     user: user_dependency,
     db: db_dependency,
-    post_id: str,
-    media_request: MediaRequest
+    media_request: MediaRequest,
+    post_id: UUID = Path(...),
 ):
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication Failed")
@@ -157,8 +159,8 @@ async def create_post_media(
         post_id=post_id,
         file_url=media_request.file_url,
         media_type=media_request.media_type,
-        metadata=media_request.metadata,
-        uploaded_at=datetime.utcnow()
+        meta_data=media_request.metadata,
+        uploaded_at=datetime.now(timezone.utc)
     )
 
     db.add(media)
@@ -174,7 +176,7 @@ async def update_media(
     user: user_dependency,
     db: db_dependency,
     media_request: MediaRequest,
-    media_id: str = Path(...)
+    media_id: UUID = Path(...)
 ):
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication Failed")
@@ -208,7 +210,7 @@ async def update_media(
 async def delete_media(
     user: user_dependency,
     db: db_dependency,
-    media_id: str = Path(...)
+    media_id: UUID = Path(...)
 ):
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication Failed")

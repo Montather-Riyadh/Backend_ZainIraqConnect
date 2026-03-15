@@ -62,9 +62,15 @@ async def create_profile(
     if existing:
         raise HTTPException(status_code=400, detail="Profile already exists")
 
+    # Convert empty strings to None for nullable DB columns
+    profile_data = {
+        k: (None if v == "" else v)
+        for k, v in profile_request.model_dump().items()
+    }
+
     new_profile = Profile(
         user_id=user.get("id"),
-        **profile_request.model_dump()
+        **profile_data
     )
 
     db.add(new_profile)
@@ -91,6 +97,9 @@ async def update_profile(
     # update fields
     update_data = profile_request.model_dump(exclude_unset=True)
     for key, value in update_data.items():
+        # Convert empty strings to None for nullable DB columns
+        if value == "":
+            value = None
         setattr(profile, key, value)
 
     db.add(profile)

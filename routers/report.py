@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models import Report, Post, Users
 from .auth import get_current_user
-from core.permissions import require_role  
+from core.permissions import require_role, require_db_permission
 
 
 
@@ -141,8 +141,8 @@ def get_post_reports_count(
     db: db_dependency,
     current_user: user_dependency,
 ):
-    #  صلاحيات: فقط admin و registrar
-    require_role(current_user, "admin", "registrar")
+    #  صلاحيات: فقط من يملك عرض بلاغات البوست
+    require_db_permission(current_user, db, "view_post_reports")
 
     _get_post_or_404(db, post_id)
 
@@ -166,8 +166,8 @@ def get_user_reports_count(
     db: db_dependency,
     current_user: user_dependency,
 ):
-    #  صلاحيات: فقط admin و registrar
-    require_role(current_user, "admin", "registrar")
+    #  صلاحيات: فقط من يملك عرض بلاغات اليوزرات
+    require_db_permission(current_user, db, "view_user_reports")
 
     _get_user_or_404(db, user_id)
 

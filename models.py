@@ -5,7 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, CITEXT, JSON
 from core.enums import ApprovalStatusEnum, GenderEnum, PrivacyLevelEnum, FriendStatusEnum, MediaTypeEnum
 from sqlalchemy.types import Text, Date
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List,Dict
 
 
@@ -26,8 +26,8 @@ class Users(SQLModel, table=True):
     )
     approved_by: Optional[uuid.UUID] = Field(default=None,foreign_key="users.id")
     approved_at: Optional[datetime] = Field(default=None)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     role_id: Optional[uuid.UUID] = Field(default=None,foreign_key="roles.role_id")
     registration_token: Optional[str] = Field(default=None,
         sa_column=Column(Text, unique=True, nullable=True))
@@ -146,7 +146,7 @@ class PostMedia(SQLModel, table=True):
             Enum(MediaTypeEnum,name="media_type_enum"),nullable=False))
     meta_data: Optional[Dict] = Field(default=None,
         sa_column=Column("metadata",JSON, nullable=True))
-    uploaded_at: datetime = Field(default_factory=datetime.utcnow)
+    uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
     post: Optional["Post"] = Relationship(back_populates="media")
@@ -209,7 +209,7 @@ class reaction(SQLModel, table=True):
     comment_id: Optional[uuid.UUID] = Field(default=None,
         sa_column=Column(UUID(as_uuid=True), ForeignKey("comments.comment_id", ondelete="CASCADE"),nullable=True))
     
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Relations
     user: Optional["Users"] = Relationship(back_populates="reactions")
@@ -239,7 +239,7 @@ class Friendship(SQLModel, table=True):
             server_default="pending"
         )
     )
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     responded_at: Optional[datetime] = Field(default=None)
 
     # relations
@@ -265,7 +265,7 @@ class Block(SQLModel, table=True):
 
     blocked_id: uuid.UUID = Field(
         sa_column=Column(UUID(as_uuid=True),ForeignKey("users.id", ondelete="CASCADE"), nullable=False))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # relations 
     blocker: Optional["Users"] = Relationship(
@@ -351,7 +351,7 @@ class Report(SQLModel, table=True):
         ),
     )
 
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Relations
     post: Optional["Post"] = Relationship(back_populates="reports",
