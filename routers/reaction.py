@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from starlette import status
 from database import get_db
 from .auth import get_current_user
-from models import reaction as Reaction, Post, Comment
+from models import Reaction, Post, Comment
 from datetime import datetime, timezone
 from core.access_control import can_view_post
 from uuid import UUID

@@ -28,7 +28,17 @@ def stream_file(
     Secure file streaming API.
     Only allows access if the user has permission to view the file.
     """
+    # Path traversal protection
+    if '..' in filename or '/' in filename or '\\' in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
     file_path = os.path.join(EXTERNAL_UPLOAD_DIR, filename)
+    
+    # Double-check resolved path is inside the upload directory
+    resolved = os.path.realpath(file_path)
+    if not resolved.startswith(os.path.realpath(EXTERNAL_UPLOAD_DIR)):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -93,6 +103,9 @@ def stream_file(
             is_authorized = True
 
     if not is_authorized:
+        # If no user and not public, return 401. If user but no permission, return 403.
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required to view this file")
         raise HTTPException(status_code=403, detail="You don't have permission to view this file")
         
     # --- STREAMING LOGIC ---

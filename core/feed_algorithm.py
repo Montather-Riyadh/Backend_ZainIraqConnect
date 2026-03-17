@@ -1,3 +1,10 @@
+
+
+
+
+
+
+
 """
 Weighted Score Feed Algorithm
 =============================
@@ -17,7 +24,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, case, literal, or_, and_
 from sqlalchemy.sql import expression
 
-from models import Post, Comment, reaction as Reaction
+from models import Post, Comment, Reaction
 
 
 def build_ranked_feed_query(

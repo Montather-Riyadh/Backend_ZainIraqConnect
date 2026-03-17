@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, Response
 from starlette import status
 from .auth import get_current_user
-from models import Users, Post, Comment, Profile, reaction as Reaction, Friendship
+from models import Users, Post, Comment, Profile, Reaction, Friendship, RefreshToken
 from passlib.context import CryptContext
 from core.permissions import require_authenticated, require_role, is_admin, require_db_permission
 from database import get_db
@@ -17,6 +17,10 @@ from dotenv import load_dotenv
 from fastapi_mail import FastMail, MessageSchema, MessageType
 from fastapi_cache.decorator import cache
 from core.config import conf
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
 
 load_dotenv()
 fm = FastMail(conf)
@@ -110,7 +114,9 @@ async def validate_registration_token(
 
 
 @router.post("/complete-registration")
+@limiter.limit("5/minute")
 async def complete_registration(
+    request: Request,
     data: CompleteRegistrationRequest,
     db: db_dependency,
 ):
@@ -134,9 +140,11 @@ async def complete_registration(
     if user.registration_token_expires_at and user.registration_token_expires_at < now_utc:
         raise HTTPException(status_code=400, detail="Registration link has expired")
 
-    # التحقق من طول كلمة المرور
-    if len(data.password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+    # التحقق من طول كلمة المرور وقوتها
+    import re
+    password_regex = r"^(?=.*[A-Z])(?=.*[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>\/?]).{6,}$"
+    if not re.match(password_regex, data.password):
+        raise HTTPException(400, "Password must be at least 6 characters, contain 1 uppercase letter, and 1 special character.")
 
     # تأكد أن اليوزرنيم غير مكرر
     existing = db.query(Users).filter(Users.username == data.username).first()
@@ -157,10 +165,105 @@ async def complete_registration(
 
     return {"detail": "تم إكمال التسجيل، يمكنك الآن تسجيل الدخول."}
 
+class ResendRegistrationRequest(BaseModel):
+    email: str
+
+@router.post("/resend-registration", status_code=status.HTTP_200_OK)
+@limiter.limit("3/minute")
+async def resend_registration(
+    request: Request,
+    data: ResendRegistrationRequest,
+    db: db_dependency,
+    background_tasks: BackgroundTasks,
+):
+    """
+    إعادة إرسال رابط إكمال التسجيل للمستخدمين الذين تمت الموافقة عليهم ولم يكملوا التسجيل.
+    """
+    user = db.query(Users).filter(Users.email == data.email).first()
+
+    if not user:
+        return {"detail": "If your account is approved and pending registration, a new link will be sent."}
+
+    if user.approval_status != "approved":
+        return {"detail": "If your account is approved and pending registration, a new link will be sent."}
+
+    if user.registration_completed_at is not None:
+        raise HTTPException(status_code=400, detail="Registration already completed")
+
+    # Generate new token
+    user.registration_token = secrets.token_urlsafe(32)
+    user.registration_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    # Send Email
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    link = f"{frontend_url}/register?token={user.registration_token}"
+
+    html = f"""
+    <!DOCTYPE html>
+    <html dir="rtl" lang="ar">
+    <head><meta charset="UTF-8"></head>
+    <body style="margin:0;padding:0;background-color:#f4f7fa;font-family:Arial,sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f7fa;padding:40px 0;">
+        <tr><td align="center">
+          <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+            <tr>
+              <td style="background:linear-gradient(135deg,#0d9488,#115e59);padding:32px 40px;text-align:center;">
+                <h1 style="margin:0;color:#ffffff;font-size:24px;">IraqConnect</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:40px;">
+                <h2 style="margin:0 0 16px;color:#1e293b;font-size:20px;">مرحباً {user.fullname} 👋</h2>
+                <p style="color:#475569;font-size:15px;line-height:1.8;margin:0 0 24px;">
+                  لقد طلبت إعادة إرسال رابط إكمال التسجيل الخاص بك.
+                  لإكمال إنشاء حسابك، يرجى الضغط على الزر أدناه لاختيار اسم المستخدم وكلمة المرور.
+                </p>
+                <table cellpadding="0" cellspacing="0" width="100%">
+                  <tr><td align="center" style="padding:8px 0 24px;">
+                    <a href="{link}" style="display:inline-block;background:linear-gradient(135deg,#0d9488,#14b8a6);color:#ffffff;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:bold;box-shadow:0 4px 14px rgba(13,148,136,0.3);">
+                      إكمال التسجيل
+                    </a>
+                  </td></tr>
+                </table>
+                <p style="color:#94a3b8;font-size:13px;line-height:1.6;margin:0;border-top:1px solid #e2e8f0;padding-top:20px;">
+                  ⏳ هذا الرابط صالح لمدة <strong>24 ساعة</strong> فقط.<br>
+                  إذا لم تقم بطلب هذا الرابط، يمكنك تجاهل هذه الرسالة.
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="background:#f8fafc;padding:20px 40px;text-align:center;border-top:1px solid #e2e8f0;">
+                <p style="margin:0;color:#94a3b8;font-size:12px;">© 2026 ZainIraqConnect. جميع الحقوق محفوظة.</p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+    </body>
+    </html>
+    """
+
+    message = MessageSchema(
+        subject="🔄 رابط جديد - أكمل تسجيل حسابك",
+        recipients=[user.email],
+        body=html,
+        subtype=MessageType.html,
+    )
+
+    background_tasks.add_task(fm.send_message, message)
+
+    return {"detail": "If your account is approved and pending registration, a new link will be sent."}
+
 
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
+@limiter.limit("3/minute")
 async def forgot_password(
+    request: Request,
     data: ForgotPasswordRequest,
     db: db_dependency,
     background_tasks: BackgroundTasks,
@@ -247,7 +350,9 @@ async def forgot_password(
 
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
 async def reset_password(
+    request: Request,
     data: ResetPasswordRequest,
     db: db_dependency,
 ):
@@ -284,16 +389,26 @@ async def reset_password(
     return {"detail": "Password has been successfully reset. You can now login."}
 
 
-async def change_password(user: user_dependency, db: db_dependency,user_verification: UserVerification):
+@router.put("/me/change-password", status_code=status.HTTP_200_OK)
+async def change_password(user: user_dependency, db: db_dependency, user_verification: UserVerification):
     require_authenticated(user)
     
     user_model = db.query(Users).filter(Users.id == user.get('id')).first()
 
     if not bcrypt_context.verify(user_verification.password, user_model.password_hash):
         raise HTTPException(status_code=401, detail='Error on password change')
+
+    # Enforce strong password
+    import re
+    password_regex = r"^(?=.*[A-Z])(?=.*[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>\/?]).{6,}$"
+    if not re.match(password_regex, user_verification.new_password):
+        raise HTTPException(400, "Password must be at least 6 characters, contain 1 uppercase letter, and 1 special character.")
+
     user_model.password_hash = bcrypt_context.hash(user_verification.new_password)
     db.add(user_model)
     db.commit()
+
+    return {"detail": "Password changed successfully"}
 
 
 
@@ -354,7 +469,9 @@ def deactivate_my_account(
 
 
 @router.post("/reactivate", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
 def reactivate_my_account(
+    request: Request,
     data: ReactivateRequest,
     db: db_dependency,
 ):
@@ -613,6 +730,13 @@ async def stop_account(
     # فقط أدمن أو ريجستر (أو نكدر نخليها أدمن فقط)
     require_db_permission(user, db, "STOP_ACCOUNT")
 
+    # ✅ AUTH-04: Prevent admin from suspending their own account
+    if str(user_id) == str(user["id"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot suspend your own account",
+        )
+
     user_model = db.query(Users).filter(Users.id == user_id).first()
     if not user_model:
         raise HTTPException(
@@ -629,6 +753,12 @@ async def stop_account(
     #  إيقاف الحساب
     user_model.is_active = False
     user_model.is_suspended = True
+
+    #  إبطال جميع Refresh Tokens النشطة
+    db.query(RefreshToken).filter(
+        RefreshToken.user_id == user_id,
+        RefreshToken.is_revoked == False
+    ).update({"is_revoked": True}, synchronize_session=False)
 
     #  نسجّل من أوقفه ومتى
     user_model.approved_by = UUID(user["id"])
@@ -723,6 +853,9 @@ async def search_users(
     blocked_me = db.query(Block.blocker_id).filter(Block.blocked_id == current_uid)
     blocked_user_ids = [row[0] for row in blocked_by_me.all()] + [row[0] for row in blocked_me.all()]
 
+    # Escape SQL wildcard characters
+    safe_q = q.replace('%', '\\%').replace('_', '\\_')
+
     results = (
         db.query(Users, Profile)
         .outerjoin(Profile, Users.id == Profile.user_id)
@@ -733,9 +866,9 @@ async def search_users(
             Users.id != current_uid, # Exclude self from search
         )
         .filter(
-            (Users.username.ilike(f"%{q}%"))
-            | (Users.email.ilike(f"%{q}%"))
-            | (Profile.display_name.ilike(f"%{q}%"))
+            (Users.username.ilike(f"%{safe_q}%", escape='\\'))
+            | (Users.email.ilike(f"%{safe_q}%", escape='\\'))
+            | (Profile.display_name.ilike(f"%{safe_q}%", escape='\\'))
         )
         .limit(20)
         .all()
@@ -745,7 +878,6 @@ async def search_users(
         {
             "id": str(user.id),
             "username": user.username,
-            "email": user.email,
             "display_name": profile.display_name if profile else None,
             "avatar_url": profile.avatar_url if profile else None,
             "bio": profile.bio if profile else None,
@@ -901,10 +1033,11 @@ async def admin_list_users(
         query = query.filter(Users.approval_status == approval_status)
 
     if q:
+        safe_q = q.replace('%', '\\%').replace('_', '\\_')
         query = query.filter(
-            (Users.username.ilike(f"%{q}%"))
-            | (Users.email.ilike(f"%{q}%"))
-            | (Profile.display_name.ilike(f"%{q}%"))
+            (Users.username.ilike(f"%{safe_q}%", escape='\\'))
+            | (Users.email.ilike(f"%{safe_q}%", escape='\\'))
+            | (Profile.display_name.ilike(f"%{safe_q}%", escape='\\'))
         )
 
     users_profiles = query.order_by(Users.created_at.desc()).offset(skip).limit(limit).all()

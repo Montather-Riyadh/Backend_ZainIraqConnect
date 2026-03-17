@@ -41,7 +41,7 @@ class Users(SQLModel, table=True):
     profile: Optional["Profile"] = Relationship(back_populates="user")
     posts: list["Post"] = Relationship(back_populates="author")
     comments: list["Comment"] = Relationship(back_populates="author")
-    reactions: list["reaction"] = Relationship(back_populates="user")
+    reactions: list["Reaction"] = Relationship(back_populates="user")
     friendships_sent: list["Friendship"] = Relationship(
         back_populates="requester",
         sa_relationship_kwargs={"foreign_keys": "[Friendship.requester_id]"})
@@ -63,6 +63,22 @@ class Users(SQLModel, table=True):
 
     received_reports: List["Report"] = Relationship(back_populates="reported_user",
         sa_relationship_kwargs={"foreign_keys": "[Report.reported_user_id]"},)
+    
+    refresh_tokens: List["RefreshToken"] = Relationship(back_populates="user")
+
+
+class RefreshToken(SQLModel, table=True):
+    __tablename__ = "refresh_tokens"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID = Field(foreign_key="users.id", nullable=False)
+    token: str = Field(sa_column=Column(Text, unique=True, nullable=False))
+    expires_at: datetime = Field(nullable=False)
+    is_revoked: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Relations
+    user: Optional["Users"] = Relationship(back_populates="refresh_tokens")
 
 
 
@@ -118,14 +134,14 @@ class Post(SQLModel, table=True):
         ),
         default="public"
     )
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_deleted: bool = Field(default=False,
         sa_column=Column(Boolean, server_default="false", nullable=False))
 
     #Relations
     author: Optional["Users"] = Relationship(back_populates="posts")
-    reactions: list["reaction"] = Relationship(back_populates="post")
+    reactions: list["Reaction"] = Relationship(back_populates="post")
     media: list["PostMedia"] = Relationship(back_populates="post")
     comments: list["Comment"] = Relationship(back_populates="post")
     reports: List["Report"] = Relationship(back_populates="post")
@@ -165,14 +181,14 @@ class Comment(SQLModel, table=True):
     parent_comment_id: Optional[uuid.UUID] = Field(default=None,
         sa_column=Column(UUID(as_uuid=True), ForeignKey("comments.comment_id", ondelete="CASCADE"), nullable=True))
     content: str = Field(sa_column=Column(Text, nullable=False))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_deleted: bool = Field(default=False,
         sa_column=Column(Boolean, server_default="false", nullable=False))
 
     author: Optional["Users"] = Relationship(back_populates="comments")
     post: Optional["Post"] = Relationship(back_populates="comments")
-    reactions: list["reaction"] = Relationship(back_populates="comment")
+    reactions: list["Reaction"] = Relationship(back_populates="comment")
 
     # nested replies
     replies: List["Comment"] = Relationship(
@@ -187,7 +203,7 @@ class Comment(SQLModel, table=True):
 
 
 
-class reaction(SQLModel, table=True):
+class Reaction(SQLModel, table=True):
     __tablename__ = "reactions"
 
     __table_args__ = (

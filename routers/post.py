@@ -26,10 +26,11 @@ class PostRequest(BaseModel):
 
 
 from core.access_control import get_friend_ids, can_view_post, get_blocked_user_ids
+from models import Reaction, Comment as CommentModel, PostMedia
 
 
-def _serialize_post(post: Post, db: Session, author: Users = None, profile: Profile = None) -> dict:
-    """Convert a Post ORM object to a dict with joined author info."""
+def _serialize_post(post: Post, db: Session, author: Users = None, profile: Profile = None, current_user_id: Optional[UUID] = None) -> dict:
+    """Convert a Post ORM object to a dict with joined author info, counts, and media."""
     data = {
         "post_id": str(post.post_id),
         "author_id": str(post.author_id),
@@ -53,6 +54,39 @@ def _serialize_post(post: Post, db: Session, author: Users = None, profile: Prof
     data["author_username"] = author.username if author else None
     data["author_display_name"] = profile.display_name if profile else None
     data["author_avatar"] = profile.avatar_url if profile else None
+
+    # ✅ FE-01: Include counts and media inline to avoid N+1 API calls
+    data["reaction_count"] = (
+        db.query(Reaction)
+        .filter(Reaction.post_id == post.post_id)
+        .count()
+    )
+    data["comment_count"] = (
+        db.query(CommentModel)
+        .filter(CommentModel.post_id == post.post_id, CommentModel.is_deleted == False)
+        .count()
+    )
+
+    # Check if current user has liked this post
+    data["user_has_liked"] = False
+    if current_user_id:
+        data["user_has_liked"] = (
+            db.query(Reaction)
+            .filter(Reaction.post_id == post.post_id, Reaction.user_id == current_user_id)
+            .first() is not None
+        )
+
+    # Include media items
+    media_items = db.query(PostMedia).filter(PostMedia.post_id == post.post_id).all()
+    data["media"] = [
+        {
+            "media_id": str(m.post_media_id),
+            "file_url": m.file_url,
+            "media_type": m.media_type,
+        }
+        for m in media_items
+    ]
+
     return data
 
 
@@ -99,12 +133,15 @@ async def read_all_posts(
     author_dict = {u.id: u for u in authors}
     profile_dict = {p.user_id: p for p in profiles}
 
+    current_uid = UUID(str(user.get("id")))
+
     return [
         _serialize_post(
             p, 
             db, 
             author=author_dict.get(p.author_id), 
-            profile=profile_dict.get(p.author_id)
+            profile=profile_dict.get(p.author_id),
+            current_user_id=current_uid,
         ) for p in posts
     ]
 
@@ -136,7 +173,7 @@ async def read_post(
             detail="Not allowed to view this post",
         )
 
-    return _serialize_post(post, db)
+    return _serialize_post(post, db, current_user_id=UUID(str(user.get("id"))))
 
 
 #  إنشاء بوست
@@ -164,7 +201,7 @@ async def create_post(
     db.commit()
     db.refresh(post)
 
-    return _serialize_post(post, db)
+    return _serialize_post(post, db, current_user_id=UUID(str(user.get("id"))))
 
 
 #  تعديل بوست (صاحب البوست)
@@ -214,7 +251,7 @@ async def delete_post(
         raise HTTPException(status_code=404, detail="Post not found")
 
     post.is_deleted = True
-    post.updated_at = datetime.utcnow()
+    post.updated_at = datetime.now(timezone.utc)
     db.add(post)
     db.commit()
 
@@ -283,11 +320,14 @@ async def get_feed(
     author_dict = {u.id: u for u in authors}
     profile_dict = {p.user_id: p for p in profiles}
 
+    current_uid = UUID(str(user.get("id")))
+
     return [
         _serialize_post(
             p, 
             db, 
             author=author_dict.get(p.author_id), 
-            profile=profile_dict.get(p.author_id)
+            profile=profile_dict.get(p.author_id),
+            current_user_id=current_uid,
         ) for p in posts
     ]
