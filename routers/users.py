@@ -144,7 +144,7 @@ async def complete_registration(
     import re
     password_regex = r"^(?=.*[A-Z])(?=.*[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>\/?]).{6,}$"
     if not re.match(password_regex, data.password):
-        raise HTTPException(400, "Password must be at least 6 characters, contain 1 uppercase letter, and 1 special character.")
+        raise HTTPException(400, "Password must be at least 6 characters, contain 1 uppercase letter, and 1 special character and numbers.")
 
     # تأكد أن اليوزرنيم غير مكرر
     existing = db.query(Users).filter(Users.username == data.username).first()
