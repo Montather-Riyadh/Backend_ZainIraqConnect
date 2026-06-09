@@ -411,7 +411,7 @@ async def refresh_access_token(
             detail="Account is not active or approved.",
         )
 
-    # ✅ AUTH-02: Revoke the old refresh token (rotation)
+    # AUTH-02: Revoke the old refresh token (rotation)
     db_token.is_revoked = True
     db.add(db_token)
 
